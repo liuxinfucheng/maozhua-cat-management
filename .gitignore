@@ -1,0 +1,11 @@
+node_modules/
+dist/
+src-tauri/target/
+.DS_Store
+*.log
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+
+# 运行时本地数据不上传到代码仓库
+本地数据/
