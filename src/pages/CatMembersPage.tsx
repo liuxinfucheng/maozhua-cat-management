@@ -1,5 +1,7 @@
 import {
   DeleteOutlined,
+  DownOutlined,
+  FilterOutlined,
   DownloadOutlined,
   EditOutlined,
   EyeOutlined,
@@ -12,7 +14,9 @@ import {
 import {
   AutoComplete,
   Button,
+  DatePicker,
   Drawer,
+  Dropdown,
   Empty,
   Form,
   Image as AntImage,
@@ -21,6 +25,7 @@ import {
   message,
   Modal,
   Popconfirm,
+  Popover,
   Select,
   Space,
   Table,
@@ -29,7 +34,8 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
+import type { ComponentProps, PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { PawIcon } from "../components/PawIcon";
 import {
   deleteCatPhoto,
@@ -48,8 +54,25 @@ import type {
   CatMemberFormValues,
 } from "../types/catMember";
 import { createNextCatMemberId } from "../utils/catMember";
+import { ageRanges, compareAgeInMonths, getAgeInMonths, matchesAgeRange, unknownAgeLabel } from "../utils/catAge";
+import { compareDefaultMemberOrder, compareMemberText, compareRehomingDate, compareVaccineStatus, matchesDateRange } from "../utils/catMemberSort";
 
 const initialData: CatMemberDataFile = { schemaVersion: 4, records: [] };
+const memberFilterFields = [
+  { key: "adoptionStatus", label: "是否领养" },
+  { key: "gender", label: "性别" },
+  { key: "age", label: "年龄" },
+  { key: "vaccineStatus", label: "疫苗情况" },
+  { key: "neutered", label: "绝育情况" },
+  { key: "lastVaccineDate", label: "上一针疫苗时间" },
+  { key: "adoptionDate", label: "领养日期" },
+  { key: "adopter", label: "送养人" },
+] as const;
+type MemberFilterKey = typeof memberFilterFields[number]["key"];
+type MemberFilters = Partial<Record<MemberFilterKey, string>>;
+type CatMemberRow = CatMember & { ageInMonths: number | null };
+type DateFilterKey = "lastVaccineDate" | "adoptionDate";
+type DateRangeValue = ComponentProps<typeof DatePicker.RangePicker>["value"];
 const defaultMemberFormValues: Partial<CatMemberFormValues> = {
   serialNumber: "",
   photo: "",
@@ -329,6 +352,8 @@ function FlexibleDateInput({
 }
 
 export function CatMembersPage() {
+  const navigate = useNavigate();
+  const [exportSort, setExportSort] = useState<{ field: string; order: "ascend" | "descend" } | null>(null);
   const [form] = Form.useForm<CatMemberFormValues>();
   const memberFormScrollRef = useRef<HTMLDivElement>(null);
   const adoptionStatus = Form.useWatch("adoptionStatus", form);
@@ -338,6 +363,11 @@ export function CatMembersPage() {
   const [dataFile, setDataFile] = useState<CatMemberDataFile>(initialData);
   const [query, setQuery] = useState("");
   const [searchKeyword, setSearchKeyword] = useState("");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const [memberFilters, setMemberFilters] = useState<MemberFilters>({});
+  const [dateRanges, setDateRanges] = useState<Partial<Record<DateFilterKey, DateRangeValue>>>({});
+  const [currentPage, setCurrentPage] = useState(1);
+  const activeFilterCount = Object.keys(memberFilters).length;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
@@ -384,15 +414,68 @@ export function CatMembersPage() {
     }
   }, [adoptionStatus, editorOpen, form]);
 
+  const filterOptions = useMemo(() => memberFilterFields.map((field) => ({
+    ...field,
+    values: field.key === "age"
+      ? [...ageRanges.map((range) => range.label), unknownAgeLabel]
+      : field.key === "adopter" || field.key === "lastVaccineDate" || field.key === "adoptionDate"
+        ? []
+      : [...new Set(dataFile.records
+      .filter((member) => member.deletedAt === null)
+      .map((member) => member[field.key].trim()))]
+      .sort(field.key === "vaccineStatus" ? compareVaccineStatus : compareMemberText),
+  })), [dataFile.records]);
+
+  function changeMemberFilter(key: MemberFilterKey, value: string | undefined) {
+    setMemberFilters((current) => {
+      const next = { ...current };
+      if (value === undefined) delete next[key];
+      else next[key] = value;
+      return next;
+    });
+    setCurrentPage(1);
+  }
+
+  function searchMembers() {
+    setSearchKeyword(query);
+    setCurrentPage(1);
+  }
+
   const visibleMembers = useMemo(() => {
     const keyword = searchKeyword.trim().toLocaleLowerCase();
     return dataFile.records
       .filter((member) => member.deletedAt === null)
+      .map((member): CatMemberRow => ({ ...member, ageInMonths: getAgeInMonths(member.age) }))
+      .filter((member) => memberFilterFields.every(({ key }) =>
+        memberFilters[key] === undefined || (key === "age"
+          ? matchesAgeRange(member.ageInMonths, memberFilters[key])
+          : key === "lastVaccineDate" || key === "adoptionDate"
+            ? matchesDateRange(member[key], memberFilters[key])
+          : key === "adopter"
+            ? member.adopter.toLocaleLowerCase().includes(memberFilters[key].trim().toLocaleLowerCase())
+          : member[key].trim() === memberFilters[key]),
+      ))
       .filter((member) =>
         keyword ? member.name.toLocaleLowerCase().includes(keyword) : true,
       )
-      .sort((first, second) => Number(first.id) - Number(second.id));
-  }, [dataFile.records, searchKeyword]);
+      .sort(compareDefaultMemberOrder);
+  }, [dataFile.records, searchKeyword, memberFilters]);
+
+  function exportFilteredMembers() {
+    const records = [...visibleMembers];
+    if (exportSort) {
+      const { field, order } = exportSort;
+      records.sort((first, second) => {
+        const result = field === "age"
+          ? compareAgeInMonths(first.ageInMonths, second.ageInMonths)
+          : field === "vaccineStatus"
+            ? compareVaccineStatus(first.vaccineStatus, second.vaccineStatus)
+            : compareRehomingDate(first.rehomingDate, second.rehomingDate);
+        return order === "ascend" ? result : -result;
+      });
+    }
+    navigate("/export", { state: { filteredMemberIds: records.map((member) => member.id) } });
+  }
 
   async function handleSave() {
     let values: CatMemberFormValues;
@@ -561,7 +644,7 @@ export function CatMembersPage() {
     }
   }
 
-  const columns: ColumnsType<CatMember> = [
+  const columns: ColumnsType<CatMemberRow> = [
     {
       title: "名字",
       dataIndex: "name",
@@ -592,12 +675,14 @@ export function CatMembersPage() {
       title: "年龄",
       dataIndex: "age",
       width: 90,
+      sorter: (first, second) => compareAgeInMonths(first.ageInMonths, second.ageInMonths),
       render: (age: string) => displayValue(age),
     },
     {
       title: "疫苗情况",
       dataIndex: "vaccineStatus",
       width: 110,
+      sorter: (first, second) => compareVaccineStatus(first.vaccineStatus, second.vaccineStatus),
     },
     {
       title: "绝育情况",
@@ -611,6 +696,7 @@ export function CatMembersPage() {
       title: "送养日期",
       dataIndex: "rehomingDate",
       width: 130,
+      sorter: (first, second) => compareRehomingDate(first.rehomingDate, second.rehomingDate),
       render: displayValue,
     },
     {
@@ -670,10 +756,19 @@ export function CatMembersPage() {
           prefix={<SearchOutlined />}
           placeholder="输入猫咪名称"
           onChange={(event) => setQuery(event.target.value)}
-          onPressEnter={() => setSearchKeyword(query)}
+          onPressEnter={searchMembers}
         />
-        <Button type="primary" onClick={() => setSearchKeyword(query)}>
+        <Button type="primary" onClick={searchMembers}>
           查询
+        </Button>
+        <Button
+          icon={<FilterOutlined />}
+          type={filtersOpen || activeFilterCount > 0 ? "primary" : "default"}
+          aria-expanded={filtersOpen}
+          aria-controls="member-filter-bar"
+          onClick={() => setFiltersOpen((open) => !open)}
+        >
+          筛选{activeFilterCount > 0 ? `（${activeFilterCount}）` : ""}
         </Button>
         <span className="members-incomplete-legend">
           <WarningOutlined className="member-incomplete-icon" />
@@ -688,12 +783,113 @@ export function CatMembersPage() {
         </Button>
       </div>
 
-      <Table<CatMember>
+      {filtersOpen && (
+        <div className="member-filter-bar" id="member-filter-bar" aria-label="猫咪筛选条件">
+          {filterOptions.map(({ key, label, values }) => (
+            key === "adopter" ? (
+              <Popover
+                key={key}
+                trigger="click"
+                placement="bottomLeft"
+                title="送养人"
+                content={
+                  <Input
+                    size="small"
+                    allowClear
+                    aria-label="筛选送养人名字"
+                    placeholder="输入名字，支持单字匹配"
+                    value={memberFilters.adopter ?? ""}
+                    onChange={(event) => changeMemberFilter("adopter", event.target.value.trim() ? event.target.value : undefined)}
+                    style={{ width: 220, fontSize: 12 }}
+                  />
+                }
+              >
+                <Button size="small" type={memberFilters.adopter ? "primary" : "default"}
+                  title={`送养人：${memberFilters.adopter ?? "全部"}`}>
+                  <span className="member-filter-label">
+                    送养人{memberFilters.adopter ? `：${memberFilters.adopter}` : ""}
+                  </span>
+                  <DownOutlined />
+                </Button>
+              </Popover>
+            ) : key === "lastVaccineDate" || key === "adoptionDate" ? (
+              <Popover
+                key={key}
+                trigger="click"
+                placement="bottomLeft"
+                title={label}
+                content={
+                  <DatePicker.RangePicker
+                    size="small"
+                    value={dateRanges[key] ?? null}
+                    format="YYYY-MM-DD"
+                    placeholder={["开始日期", "结束日期"]}
+                    onChange={(dates, dateStrings) => {
+                      setDateRanges((current) => ({ ...current, [key]: dates }));
+                      changeMemberFilter(key, dates ? dateStrings.join("~") : undefined);
+                    }}
+                  />
+                }
+              >
+                <Button size="small" type={memberFilters[key] !== undefined ? "primary" : "default"}
+                  title={`${label}：${memberFilters[key]?.replace("~", " 至 ") ?? "全部"}`}>
+                  <span className="member-filter-label">
+                    {label}{memberFilters[key] ? `：${memberFilters[key].replace("~", " 至 ")}` : ""}
+                  </span>
+                  <DownOutlined />
+                </Button>
+              </Popover>
+            ) :
+            <Dropdown
+              key={key}
+              trigger={["click"]}
+              menu={{
+                selectable: true,
+                selectedKeys: [memberFilters[key] === undefined ? "all" : `value:${memberFilters[key]}`],
+                items: [
+                  { key: "all", label: "全部" },
+                  ...values.map((value) => ({ key: `value:${value}`, label: value || "未填写" })),
+                ],
+                onClick: ({ key: optionKey }) => changeMemberFilter(key, optionKey === "all" ? undefined : optionKey.slice(6)),
+                className: "member-filter-menu",
+              }}
+            >
+              <Button
+                size="small"
+                type={memberFilters[key] !== undefined ? "primary" : "default"}
+                title={`${label}：${memberFilters[key] === undefined ? "全部" : memberFilters[key] || "未填写"}`}
+              >
+                <span className="member-filter-label">
+                  {label}{memberFilters[key] !== undefined ? `：${memberFilters[key] || "未填写"}` : ""}
+                </span>
+                <DownOutlined />
+              </Button>
+            </Dropdown>
+          ))}
+          <Button size="small" type="link" disabled={activeFilterCount === 0} onClick={() => {
+            setMemberFilters({});
+            setDateRanges({});
+            setCurrentPage(1);
+          }}>清空筛选</Button>
+          <Button size="small" type="primary" icon={<DownloadOutlined />}
+            disabled={loading || visibleMembers.length === 0} onClick={exportFilteredMembers}>
+            导出当前结果（{visibleMembers.length}）
+          </Button>
+        </div>
+      )}
+
+      <Table<CatMemberRow>
         rowKey="id"
         size="middle"
         loading={loading}
         columns={columns}
         dataSource={visibleMembers}
+        sortDirections={["ascend", "descend", "ascend"]}
+        onChange={(pagination, _filters, sorter) => {
+          setCurrentPage(pagination.current ?? 1);
+          const current = Array.isArray(sorter) ? sorter[0] : sorter;
+          setExportSort(current?.order ? { field: String(current.field), order: current.order } : null);
+        }}
         onRow={(member) => {
           const missingFields = getMissingRequiredFields(member);
           return {
@@ -704,6 +900,7 @@ export function CatMembersPage() {
         }}
         scroll={{ x: 1120 }}
         pagination={{
+          current: currentPage,
           pageSize: tablePageSize,
           showSizeChanger: false,
           showQuickJumper: true,
@@ -713,7 +910,7 @@ export function CatMembersPage() {
           emptyText: (
             <Empty
               image={Empty.PRESENTED_IMAGE_SIMPLE}
-              description={searchKeyword ? "未找到匹配的猫咪" : "暂无猫咪成员"}
+              description={searchKeyword || activeFilterCount > 0 ? "未找到匹配的猫咪" : "暂无猫咪成员"}
             />
           ),
         }}

@@ -192,6 +192,34 @@ body {
   width: 280px;
 }
 
+.member-filter-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: -8px 0 18px;
+}
+
+.member-filter-bar .ant-btn {
+  font-size: 12px;
+}
+
+.member-filter-label {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-filter-menu {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.member-filter-menu .ant-dropdown-menu-title-content {
+  font-size: 12px;
+}
+
 .members-page .ant-table-wrapper .ant-table-pagination.ant-pagination {
   margin-right: 54px;
 }

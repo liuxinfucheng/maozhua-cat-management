@@ -20,6 +20,7 @@ import {
 } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useMemo, useState } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 import * as XLSX from "xlsx";
 import { loadCatMemberData } from "../services/catMemberStorage";
 import type { AdoptionStatus, CatMember } from "../types/catMember";
@@ -59,7 +60,7 @@ function toExportRow(member: CatMember) {
   ];
 }
 
-function createExportFileName(category: ExportCategory) {
+function createExportFileName(category: string) {
   const now = new Date();
   const date = [
     now.getFullYear(),
@@ -76,8 +77,8 @@ function createExportFileName(category: ExportCategory) {
 
 const previewColumns: ColumnsType<CatMember> = [
   { title: "ID", dataIndex: "id", width: 82, fixed: "left" },
-  { title: "序号", dataIndex: "serialNumber", width: 90, fixed: "left", ellipsis: true, render: (value) => value || "-" },
   { title: "名字", dataIndex: "name", width: 120, fixed: "left", render: (value) => value || "-" },
+  { title: "序号", dataIndex: "serialNumber", width: 90, ellipsis: true, render: (value) => value || "-" },
   {
     title: "是否领养",
     dataIndex: "adoptionStatus",
@@ -106,6 +107,12 @@ const previewColumns: ColumnsType<CatMember> = [
 ];
 
 export function ExportDataPage() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const filteredIds = useMemo<string[] | null>(() => {
+    const ids = location.state?.filteredMemberIds;
+    return Array.isArray(ids) && ids.every((id) => typeof id === "string") ? ids : null;
+  }, [location.state]);
   const [messageApi, messageContextHolder] = message.useMessage();
   const [members, setMembers] = useState<CatMember[]>([]);
   const [category, setCategory] = useState<ExportCategory>("全部");
@@ -114,9 +121,17 @@ export function ExportDataPage() {
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
+    setCategory("全部");
     loadCatMemberData()
       .then((data) => {
-        if (active) setMembers(data.records.filter((member) => member.deletedAt === null));
+        if (!active) return;
+        const available = data.records.filter((member) => member.deletedAt === null);
+        const byId = new Map(available.map((member) => [member.id, member]));
+        setMembers(filteredIds === null ? available : filteredIds.flatMap((id) => {
+          const member = byId.get(id);
+          return member ? [member] : [];
+        }));
       })
       .catch(() => {
         if (active) messageApi.error("猫咪数据读取失败，请稍后重试");
@@ -127,7 +142,7 @@ export function ExportDataPage() {
     return () => {
       active = false;
     };
-  }, [messageApi]);
+  }, [messageApi, filteredIds]);
 
   const adoptedCount = useMemo(
     () => members.filter((member) => member.adoptionStatus === "已领养").length,
@@ -167,7 +182,7 @@ export function ExportDataPage() {
 
       const workbook = XLSX.utils.book_new();
       XLSX.utils.book_append_sheet(workbook, worksheet, "猫咪成员总表");
-      XLSX.writeFile(workbook, createExportFileName(category), { compression: true });
+      XLSX.writeFile(workbook, createExportFileName(filteredIds !== null ? `筛选结果_${category}` : category), { compression: true });
       messageApi.success(`已导出 ${previewMembers.length} 条猫咪数据`);
     } catch {
       messageApi.error("Excel 导出失败，请稍后重试");
@@ -191,7 +206,7 @@ export function ExportDataPage() {
 
       <Row gutter={[14, 14]} className="export-stats">
         <Col xs={24} sm={8}>
-          <Card size="small"><Statistic title="有效数据" value={members.length} prefix={<TeamOutlined />} /></Card>
+          <Card size="small"><Statistic title={filteredIds !== null ? "筛选结果" : "有效数据"} value={members.length} prefix={<TeamOutlined />} /></Card>
         </Col>
         <Col xs={24} sm={8}>
           <Card size="small"><Statistic title="已领养" value={adoptedCount} prefix={<CheckCircleOutlined />} /></Card>
@@ -203,8 +218,8 @@ export function ExportDataPage() {
 
       <div className="export-control-card">
         <div className="export-control-copy">
-          <strong>选择导出分类</strong>
-          <span>预览内容与最终导出的数据保持一致</span>
+          <strong>{filteredIds !== null ? "导出列表筛选结果" : "选择导出分类"}</strong>
+          <span>{filteredIds !== null ? "已带入全部匹配记录及列表排序，可继续按领养状态细分" : "预览内容与最终导出的数据保持一致"}</span>
         </div>
         <Segmented<ExportCategory>
           value={category}
@@ -215,6 +230,9 @@ export function ExportDataPage() {
             { label: `未领养（${notAdoptedCount}）`, value: "未领养" },
           ]}
         />
+        {filteredIds !== null && (
+          <Button onClick={() => navigate("/export", { replace: true, state: null })}>查看全部数据</Button>
+        )}
         <Button
           type="primary"
           icon={<DownloadOutlined />}
