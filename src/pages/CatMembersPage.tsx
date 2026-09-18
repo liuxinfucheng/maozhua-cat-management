@@ -55,7 +55,7 @@ import type {
 } from "../types/catMember";
 import { createNextCatMemberId } from "../utils/catMember";
 import { ageRanges, compareAgeInMonths, getAgeInMonths, matchesAgeRange, unknownAgeLabel } from "../utils/catAge";
-import { compareDefaultMemberOrder, compareMemberText, compareRehomingDate, compareVaccineStatus, matchesDateRange } from "../utils/catMemberSort";
+import { compareDefaultMemberOrder, compareFeeDueDate, compareMemberText, compareRehomingDate, compareVaccineStatus, dateValue, getFeeDueDateEnd, matchesDateRange } from "../utils/catMemberSort";
 
 const initialData: CatMemberDataFile = { schemaVersion: 4, records: [] };
 const memberFilterFields = [
@@ -67,12 +67,14 @@ const memberFilterFields = [
   { key: "lastVaccineDate", label: "上一针疫苗时间" },
   { key: "adoptionDate", label: "领养日期" },
   { key: "adopter", label: "送养人" },
+  { key: "feeDueDate", label: "收费到期" },
 ] as const;
 type MemberFilterKey = typeof memberFilterFields[number]["key"];
 type MemberFilters = Partial<Record<MemberFilterKey, string>>;
 type CatMemberRow = CatMember & { ageInMonths: number | null };
 type DateFilterKey = "lastVaccineDate" | "adoptionDate";
 type DateRangeValue = ComponentProps<typeof DatePicker.RangePicker>["value"];
+const feeDueDateFilterOptions = ["即将到期", "未识别", "2026", "2027"] as const;
 const defaultMemberFormValues: Partial<CatMemberFormValues> = {
   serialNumber: "",
   photo: "",
@@ -351,6 +353,63 @@ function FlexibleDateInput({
   );
 }
 
+function parseFeeDueDateRange(value: string) {
+  const normalizedValue = value.trim();
+  const storedRange = normalizedValue.match(
+    /^(\d{4}\/\d{2}\/\d{2})?-(\d{4}\/\d{2}\/\d{2})?$/,
+  );
+  if (storedRange) return { start: storedRange[1] ?? "", end: storedRange[2] ?? "" };
+
+  const legacyRange = normalizedValue.match(
+    /^(\d{4}-\d{2}-\d{2})-(\d{4}-\d{2}-\d{2})$/,
+  );
+  if (legacyRange) {
+    return {
+      start: legacyRange[1].replaceAll("-", "/"),
+      end: legacyRange[2].replaceAll("-", "/"),
+    };
+  }
+
+  const legacySingleDate = normalizedValue.match(/^\d{4}-\d{2}-\d{2}$/);
+  return {
+    start: "",
+    end: legacySingleDate ? normalizedValue.replaceAll("-", "/") : "",
+  };
+}
+
+function FeeDueDateRangeInput({
+  value = "",
+  onChange,
+}: {
+  value?: string;
+  onChange?: (value: string) => void;
+}) {
+  const range = parseFeeDueDateRange(value);
+  const emitRange = (start: string, end: string) => {
+    if (!start && !end) onChange?.("");
+    else onChange?.(`${start}-${end}`);
+  };
+
+  return (
+    <Space.Compact block>
+      <Input
+        aria-label="收费开始时间"
+        addonBefore="开始"
+        type="date"
+        value={range.start.replaceAll("/", "-")}
+        onChange={(event) => emitRange(event.target.value.replaceAll("-", "/"), range.end)}
+      />
+      <Input
+        aria-label="收费结束时间"
+        addonBefore="结束"
+        type="date"
+        value={range.end.replaceAll("/", "-")}
+        onChange={(event) => emitRange(range.start, event.target.value.replaceAll("-", "/"))}
+      />
+    </Space.Compact>
+  );
+}
+
 export function CatMembersPage() {
   const navigate = useNavigate();
   const [exportSort, setExportSort] = useState<{ field: string; order: "ascend" | "descend" } | null>(null);
@@ -418,6 +477,8 @@ export function CatMembersPage() {
     ...field,
     values: field.key === "age"
       ? [...ageRanges.map((range) => range.label), unknownAgeLabel]
+      : field.key === "feeDueDate"
+        ? [...feeDueDateFilterOptions]
       : field.key === "adopter" || field.key === "lastVaccineDate" || field.key === "adoptionDate"
         ? []
       : [...new Set(dataFile.records
@@ -433,6 +494,7 @@ export function CatMembersPage() {
       else next[key] = value;
       return next;
     });
+    if (key === "feeDueDate") setExportSort(null);
     setCurrentPage(1);
   }
 
@@ -453,12 +515,27 @@ export function CatMembersPage() {
             ? matchesDateRange(member[key], memberFilters[key])
           : key === "adopter"
             ? member.adopter.toLocaleLowerCase().includes(memberFilters[key].trim().toLocaleLowerCase())
+          : key === "feeDueDate"
+            ? memberFilters[key] === "即将到期"
+              ? getFeeDueDateEnd(member.feeDueDate) !== null
+              : memberFilters[key] === "未识别"
+                ? getFeeDueDateEnd(member.feeDueDate) === null
+                : (() => {
+                    const feeDueDateEnd = getFeeDueDateEnd(member.feeDueDate);
+                    return feeDueDateEnd !== null
+                      && feeDueDateEnd.date !== null
+                      && new Date(feeDueDateEnd.date).getUTCFullYear() === Number(memberFilters[key]);
+                  })()
           : member[key].trim() === memberFilters[key]),
       ))
       .filter((member) =>
         keyword ? member.name.toLocaleLowerCase().includes(keyword) : true,
       )
-      .sort(compareDefaultMemberOrder);
+      .sort((first, second) => memberFilters.feeDueDate && memberFilters.feeDueDate !== "未识别"
+        ? compareFeeDueDate(first.feeDueDate, second.feeDueDate)
+        : memberFilters.feeDueDate === "未识别"
+          ? compareMemberText(first.feeDueDate, second.feeDueDate)
+          : compareDefaultMemberOrder(first, second));
   }, [dataFile.records, searchKeyword, memberFilters]);
 
   function exportFilteredMembers() {
@@ -705,6 +782,12 @@ export function CatMembersPage() {
       width: 130,
       render: displayValue,
     },
+    ...(memberFilters.feeDueDate ? [{
+      title: "收费到期",
+      dataIndex: "feeDueDate",
+      width: 190,
+      render: (value: string) => displayValue(value),
+    }] : []),
     {
       title: "操作",
       key: "actions",
@@ -879,6 +962,7 @@ export function CatMembersPage() {
       )}
 
       <Table<CatMemberRow>
+        key={`member-table-${memberFilters.feeDueDate ?? "all"}`}
         rowKey="id"
         size="middle"
         loading={loading}
@@ -898,7 +982,7 @@ export function CatMembersPage() {
               : undefined,
           };
         }}
-        scroll={{ x: 1120 }}
+        scroll={{ x: memberFilters.feeDueDate ? 1310 : 1120 }}
         pagination={{
           current: currentPage,
           pageSize: tablePageSize,
@@ -1100,8 +1184,24 @@ export function CatMembersPage() {
             <Form.Item label="笼位费用" name="cageFee">
               <InputNumber min={0} precision={2} addonAfter="元" />
             </Form.Item>
-            <Form.Item label="收费到期" name="feeDueDate">
-              <Input type="date" />
+            <Form.Item
+              label="收费到期"
+              name="feeDueDate"
+              rules={[{
+                validator: async (_, value: string | undefined) => {
+                  if (!value) return;
+                  const match = value.match(
+                    /^(\d{4}\/\d{2}\/\d{2})-(\d{4}\/\d{2}\/\d{2})$/,
+                  );
+                  if (!match) throw new Error("请同时选择开始时间和结束时间");
+                  const start = dateValue(match[1]);
+                  const end = dateValue(match[2]);
+                  if (start === null || end === null) throw new Error("请选择有效的收费日期");
+                  if (start > end) throw new Error("结束时间不能早于开始时间");
+                },
+              }]}
+            >
+              <FeeDueDateRangeInput />
             </Form.Item>
             <Form.Item label="状态" name="status">
               <Input maxLength={50} placeholder="请输入" />

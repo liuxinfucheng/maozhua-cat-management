@@ -50,3 +50,55 @@ export function compareRehomingDate(first: string, second: string) {
   if (secondDate !== null) return 1;
   return compareMemberText(first, second);
 }
+
+export function getFeeDueDateEnd(value: string, currentYear = new Date().getFullYear()) {
+  const normalizedValue = value.trim();
+  if (!normalizedValue.includes("-")) return null;
+
+  // Prefer a suffix that is itself a complete date. This also supports ranges
+  // whose start and end values use hyphens, such as 2026-01-01-2026-02-01.
+  for (
+    let index = normalizedValue.indexOf("-");
+    index >= 0;
+    index = normalizedValue.indexOf("-", index + 1)
+  ) {
+    const endValue = normalizedValue.slice(index + 1).trim();
+    const endDate = dateValue(endValue);
+    if (endDate !== null) {
+      return {
+        value: endValue,
+        date: endDate,
+        isCurrentYear: new Date(endDate).getUTCFullYear() === currentYear,
+      };
+    }
+  }
+
+  const endValue = normalizedValue.slice(normalizedValue.lastIndexOf("-") + 1).trim();
+  const abbreviatedDate = endValue.match(/^(\d{1,2})[/.](\d{1,2})$/);
+  const inferredDate = abbreviatedDate
+    ? dateValue(`${currentYear}/${abbreviatedDate[1]}/${abbreviatedDate[2]}`)
+    : null;
+  return {
+    value: endValue,
+    date: inferredDate,
+    isCurrentYear: inferredDate !== null,
+  };
+}
+
+export function compareFeeDueDate(first: string, second: string) {
+  const firstEnd = getFeeDueDateEnd(first);
+  const secondEnd = getFeeDueDateEnd(second);
+  if (firstEnd === null && secondEnd === null) return 0;
+  if (firstEnd === null) return 1;
+  if (secondEnd === null) return -1;
+
+  // Current-year dates (including MM/DD and MM.DD with an inferred year) come
+  // first. Non-date text follows, and explicitly non-current years stay last.
+  const firstRank = firstEnd.isCurrentYear ? 0 : firstEnd.date === null ? 1 : 2;
+  const secondRank = secondEnd.isCurrentYear ? 0 : secondEnd.date === null ? 1 : 2;
+  if (firstRank !== secondRank) return firstRank - secondRank;
+  if (firstEnd.date !== null && secondEnd.date !== null) {
+    return firstEnd.date - secondEnd.date || compareMemberText(firstEnd.value, secondEnd.value);
+  }
+  return compareMemberText(firstEnd.value, secondEnd.value);
+}
